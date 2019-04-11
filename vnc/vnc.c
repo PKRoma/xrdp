@@ -16,6 +16,14 @@
  * limitations under the License.
  *
  * libvnc
+ *
+ * The message definitions used in this source file can be found mostly
+ * in RFC6143 - "The Remote Framebuffer Protocol".
+ *
+ * The ExtendedDesktopSize encoding is reserved in RFC6143, but not
+ * documented there. It is documented by the RFB protocol community
+ * wiki currently held at https://github.com/rfbproto/rfbroto. This is
+ * referred to below as the "RFB community wiki"
  */
 
 #if defined(HAVE_CONFIG_H)
@@ -26,6 +34,7 @@
 #include "log.h"
 #include "trans.h"
 #include "ssl_calls.h"
+#include "xrdp_client_info.h"
 
 #define LLOG_LEVEL 1
 #define LLOGLN(_level, _args) \
@@ -40,6 +49,13 @@
     while (0)
 
 #define AS_LOG_MESSAGE log_message
+
+/* Encodings and pseudo-encodings from RFC6143 */
+#define ENC_RAW                   0
+#define ENC_COPY_RECT             1
+#define ENC_CURSOR                (unsigned int)-239
+#define ENC_DESKTOP_SIZE          (unsigned int)-223
+#define ENC_EXTENDED_DESKTOP_SIZE (unsigned int)-308
 
 static int
 lib_mod_process_message(struct vnc *v, struct stream *s);
@@ -256,6 +272,356 @@ lib_process_channel_data(struct vnc *v, int chanid, int flags, int size,
 }
 
 /******************************************************************************/
+static void
+log_debug_screen_layout(const char *source,
+                        const struct vnc_screen_layout *layout)
+{
+    unsigned int i;
+    char text[256];
+    size_t pos;
+    int res;
+
+    pos = 0;
+    res = g_snprintf(text, sizeof(text) - pos,
+                     "Layout from %s (#screens=%d) :",
+                     source, layout->count);
+
+    i = 0;
+    while (res > 0 && res < sizeof(text) - pos && i < layout->count)
+    {
+        pos += res;
+        res = g_snprintf(&text[pos], sizeof(text) - pos,
+                         " %d:(%dx%d+%d+%d)",
+                         layout->s[i].id,
+                         layout->s[i].width, layout->s[i].height,
+                         layout->s[i].x, layout->s[i].y);
+        ++i;
+    }
+    log_message(LOG_LEVEL_DEBUG, text);
+}
+
+/*****************************************************************************
+ * Compares two vnc_screen structures, returning a value which can
+ * also be used for sorting on id
+ */
+static int cmp_vnc_screen(const struct vnc_screen *a,
+                          const struct vnc_screen *b)
+{
+    int result = 0;
+    if (a->id != b->id)
+    {
+        result = a->id - b->id;
+    }
+    else if (a->x != b->x)
+    {
+        result = a->x - b->x;
+    }
+    else if (a->y != b->y)
+    {
+        result = a->y - b->y;
+    }
+    else if (a->width != b->width)
+    {
+        result = a->width - b->width;
+    }
+    else if (a->height != b->height)
+    {
+        result = a->height - b->height;
+    }
+
+    return result;
+}
+
+
+/*****************************************************************************
+ * Compares two vnc_screen_layout structures
+ *
+ * Result can only be used for equality testing
+ */
+static int cmp_vnc_screen_layout(const struct vnc_screen_layout *a,
+                                 const struct vnc_screen_layout *b)
+{
+    unsigned int i;
+    int result = b->count - a->count;
+
+    for (i = 0 ; result == 0 && i < a->count ; ++i)
+    {
+        result = cmp_vnc_screen(&a->s[i], &b->s[i]);
+    }
+
+    return result;
+}
+
+
+/*****************************************************************************
+ * Reads an extended desktop size rectangle from the VNC server
+ *
+ * Returned structure is in increasing ID order, rather than order on-the-wire
+ *
+ * On a successful return, layout->s has been allocated, and must be
+ * freed after use.
+ */
+static int
+read_extended_desktop_size_rect(struct vnc *v,
+                                struct vnc_screen_layout *layout)
+{
+    struct stream *s;
+    int error;
+    unsigned int i;
+
+    layout->count = 0;
+
+    make_stream(s);
+    init_stream(s, 8192);
+
+    /* Read in the current screen config */
+    error = trans_force_read_s(v->trans, s, 4);
+    if (error == 0)
+    {
+        /* Get the number of screens */
+        in_uint8(s, layout->count);
+        in_uint8s(s, 3);
+
+        error = trans_force_read_s(v->trans, s, 16 * layout->count);
+        if (error == 0)
+        {
+            layout->s = g_new(struct vnc_screen, layout->count);
+            if (layout->s == NULL)
+            {
+                log_message(LOG_LEVEL_ERROR,
+                            "VNC : Can't alloc for %d screens", layout->count);
+                layout->count = 0;
+                error = 1;
+            }
+            else
+            {
+                for (i = 0 ; i < layout->count ; ++i)
+                {
+                    in_uint32_be(s, layout->s[i].id);
+                    in_uint16_be(s, layout->s[i].x);
+                    in_uint16_be(s, layout->s[i].y);
+                    in_uint16_be(s, layout->s[i].width);
+                    in_uint16_be(s, layout->s[i].height);
+                    in_uint32_be(s, layout->s[i].flags);
+                }
+            }
+
+            /*  sort monitors in increasing ID order */
+            qsort(layout->s, layout->count, sizeof(layout->s[0]),
+                  (int (*)(const void *, const void *))cmp_vnc_screen);
+        }
+    }
+
+    free_stream(s);
+
+    return error;
+}
+
+/*****************************************************************************
+ * Check to see if a SetDesktopSize message should be sent, based on the
+ * current Xvnc geometry and screen layout
+ */
+static int
+set_desktop_size_is_needed(struct vnc *v, int vnc_width, int vnc_height,
+                           const struct vnc_screen_layout *vnc_layout)
+{
+    int result = 0;
+
+    if (v->mod_width != vnc_width || v->mod_height != vnc_height)
+    {
+        log_message(LOG_LEVEL_DEBUG, "VNC SetDesktopSize needed "
+                    "for size change from (%d,%d) to (%d,%d)",
+                    vnc_width, vnc_height, v->mod_width, v->mod_height);
+        result = 1;
+    }
+    else if (cmp_vnc_screen_layout(vnc_layout, &v->screen_layout) != 0)
+    {
+        log_message(LOG_LEVEL_DEBUG, "VNC SetDesktopSize needed "
+                    "for changed screen layouts");
+        result = 1;
+    }
+    else
+    {
+        log_message(LOG_LEVEL_DEBUG, "VNC SetDesktopSize not needed");
+    }
+
+    return result;
+}
+
+/*****************************************************************************
+ * Send a SetDesktopSize message based on the initial RDP parameters
+ */
+static int
+send_set_desktop_size_msg(struct vnc *v)
+{
+    unsigned int i;
+    struct stream *s;
+    int error;
+
+    make_stream(s);
+    init_stream(s, 8192);
+    out_uint8(s, 251);
+    out_uint8(s, 0);
+    out_uint16_be(s, v->mod_width);
+    out_uint16_be(s, v->mod_height);
+
+    out_uint8(s, v->screen_layout.count);
+    out_uint8(s, 0);
+    for (i = 0 ; i < v->screen_layout.count ; ++i)
+    {
+        out_uint32_be(s, v->screen_layout.s[i].id);
+        out_uint16_be(s, v->screen_layout.s[i].x);
+        out_uint16_be(s, v->screen_layout.s[i].y);
+        out_uint16_be(s, v->screen_layout.s[i].width);
+        out_uint16_be(s, v->screen_layout.s[i].height);
+        out_uint32_be(s, v->screen_layout.s[i].flags);
+    }
+    s_mark_end(s);
+    log_message(LOG_LEVEL_DEBUG, "VNC Sending SetDesktopSize");
+    error = lib_send_copy(v, s);
+    free_stream(s);
+
+    return error;
+}
+
+/*****************************************************************************
+ * Check to resize the attached client
+ *
+ * The resizing of multi-screen layouts isn't supported. If
+ * we end up in this situation we currently throw an error, resulting in
+ * a disconnect.
+ */
+static int
+check_to_resize_client(struct vnc *v, int width, int height,
+                       const struct vnc_screen_layout *layout)
+{
+    int error = 0;
+
+    if (width != v->mod_width || height != v->mod_height ||
+            cmp_vnc_screen_layout(&v->screen_layout, layout) != 0)
+    {
+        /*
+         * we don't have the capability to cope with a rearrangement
+         * of a multi-screen layout.
+         */
+        if (layout->count != 1 || v->screen_layout.count != 1)
+        {
+            char text[256];
+            g_sprintf(text, "VNC Resize to %d screen(s) from %d screen(s) "
+                      "not implemented",
+                      v->screen_layout.count, layout->count);
+            v->server_msg(v, text, 0);
+
+            /* Dump some useful info, in case we get here when we don't
+             * need to */
+            log_debug_screen_layout("OldLayout", layout);
+            log_debug_screen_layout("NewLayout", layout);
+            error = 1;
+        }
+        else
+        {
+            v->mod_width = width;
+            v->mod_height = height;
+            v->screen_layout.s[0] = layout->s[0];
+            error = v->server_reset(v, width, height, v->mod_bpp);
+        }
+    }
+    return error;
+}
+
+/*****************************************************************************
+ * Process an ExtendedDesktopSize message
+ */
+static int
+process_extended_desktop_size(struct vnc *v, int x, int y, int cx, int cy,
+                              const struct vnc_screen_layout *layout)
+{
+    int error = 0;
+
+    switch (x)
+    {
+        default:
+            /* Spec says to treat unknown values as a zero */
+            if (x != 0)
+            {
+                log_message(LOG_LEVEL_ERROR,
+                            "VNC got ExtendedDesktopSize rectangle type %d", x);
+            }
+
+            if (v->first_framebuffer_update)
+            {
+                /*
+                 * This is a response to our first framebuffer update
+                 * request.  At this point, we want to impose our will
+                 * on the client.  After that, the server may request
+                 * size changes of its own.
+                 */
+                log_message(LOG_LEVEL_DEBUG,
+                            "VNC got first ExtendedDesktopSize rectangle "
+                            "x=%d, y=%d, cx=%d, cy=%d", x, y, cx, cy);
+                log_debug_screen_layout("Xvnc", layout);
+
+                /*
+                 * If we've only got one screen, and the other side has
+                 * only got one screen, we will preserve their screen
+                 * ID and any flags.  This may prevent us sending
+                 * an unwanted SetDesktopSize message if the screen
+                 * dimensions are a match. We can't do this with more than
+                 * one screen, as we have no way to map different IDs
+                 */
+                if (layout->count == 1 && v->screen_layout.count == 1)
+                {
+                    log_message(LOG_LEVEL_DEBUG, "VNC "
+                                "setting screen id to %d from server",
+                                layout->s[0].id);
+
+                    v->screen_layout.s[0].id = layout->s[0].id;
+                    v->screen_layout.s[0].flags = layout->s[0].flags;
+                }
+                if (set_desktop_size_is_needed(v, cx, cy, layout))
+                {
+                    error = send_set_desktop_size_msg(v);
+                    v->set_desktop_size_in_progress = 1;
+                }
+            }
+            else if (v->set_desktop_size_in_progress)
+            {
+                /* Ignore this, until the X server has responded */
+            }
+            else
+            {
+                /* Could be a response to another framebuffer update request,
+                 * or a server-side change (i.e. with xrandr)
+                 */
+                error = check_to_resize_client(v, cx, cy, layout);
+            }
+            break;
+
+        case 1: /* Response to a SetDesktopSize message from us */
+            v->set_desktop_size_in_progress = 0;
+            if (y == 0)
+            {
+                log_message(LOG_LEVEL_DEBUG,
+                            "VNC SetDesktopSize was successful");
+            }
+            else
+            {
+                log_message(LOG_LEVEL_ERROR,
+                            "VNC SetDesktopSize failed and returned %d", y);
+            }
+            break;
+
+        case 2:
+            /*
+             * Another client has resized or re-arranged the screen
+             */
+            error = check_to_resize_client(v, cx, cy, layout);
+            break;
+    }
+    return error;
+}
+
+/*****************************************************************************/
 int
 lib_mod_event(struct vnc *v, int msg, long param1, long param2,
               long param3, long param4)
@@ -385,7 +751,7 @@ lib_mod_event(struct vnc *v, int msg, long param1, long param2,
             /* FramebufferUpdateRequest */
             init_stream(s, 8192);
             out_uint8(s, 3);
-            out_uint8(s, 0);
+            out_uint8(s, 0); /* incremental == 0 : Full contents */
             x = (param1 >> 16) & 0xffff;
             out_uint16_be(s, x);
             y = param1 & 0xffff;
@@ -615,6 +981,8 @@ lib_framebuffer_update(struct vnc *v)
     int need_size;
     struct stream *s;
     struct stream *pixel_s;
+    int extended_desktop_size_msg_received = 0;
+    struct vnc_screen_layout layout = { 0 };
 
     num_recs = 0;
     Bpp = (v->mod_bpp + 7) / 8;
@@ -655,7 +1023,7 @@ lib_framebuffer_update(struct vnc *v)
             in_uint16_be(s, cy);
             in_uint32_be(s, encoding);
 
-            if (encoding == 0) /* raw */
+            if (encoding == ENC_RAW)
             {
                 need_size = cx * cy * Bpp;
                 init_stream(pixel_s, need_size);
@@ -666,7 +1034,7 @@ lib_framebuffer_update(struct vnc *v)
                     error = v->server_paint_rect(v, x, y, cx, cy, pixel_s->data, cx, cy, 0, 0);
                 }
             }
-            else if (encoding == 1) /* copy rect */
+            else if (encoding == ENC_COPY_RECT)
             {
                 init_stream(s, 8192);
                 error = trans_force_read_s(v->trans, s, 4);
@@ -678,7 +1046,7 @@ lib_framebuffer_update(struct vnc *v)
                     error = v->server_screen_blt(v, x, y, cx, cy, srcx, srcy);
                 }
             }
-            else if (encoding == 0xffffff11) /* cursor */
+            else if (encoding == ENC_CURSOR)
             {
                 g_memset(cursor_data, 0, 32 * (32 * 3));
                 g_memset(cursor_mask, 0, 32 * (32 / 8));
@@ -723,11 +1091,23 @@ lib_framebuffer_update(struct vnc *v)
                     error = v->server_set_cursor(v, x, y, cursor_data, cursor_mask);
                 }
             }
-            else if (encoding == 0xffffff21) /* desktop size */
+            else if (encoding == ENC_DESKTOP_SIZE)
             {
+                /* Only received for non-resizeable desktops */
                 v->mod_width = cx;
                 v->mod_height = cy;
                 error = v->server_reset(v, cx, cy, v->mod_bpp);
+            }
+            else if (encoding == ENC_EXTENDED_DESKTOP_SIZE)
+            {
+                extended_desktop_size_msg_received  = 1;
+                error = read_extended_desktop_size_rect(v, &layout);
+                if (error == 0)
+                {
+                    error = process_extended_desktop_size(v, x, y, cx, cy,
+                                                          &layout);
+                    g_free(layout.s);
+                }
             }
             else
             {
@@ -743,6 +1123,20 @@ lib_framebuffer_update(struct vnc *v)
         error = v->server_end_update(v);
     }
 
+    if (v->first_framebuffer_update)
+    {
+        v->first_framebuffer_update = 0;
+        if (v->resizeable_mode && !extended_desktop_size_msg_received)
+        {
+            log_message(LOG_LEVEL_ERROR, "Resizeable mode requested, "
+                        "but X server does not support it");
+            if (error == 0)
+            {
+                error = 1;
+            }
+        }
+    }
+
     if (error == 0)
     {
         if (v->suppress_output == 0)
@@ -750,7 +1144,7 @@ lib_framebuffer_update(struct vnc *v)
             /* FramebufferUpdateRequest */
             init_stream(s, 8192);
             out_uint8(s, 3);
-            out_uint8(s, 1);
+            out_uint8(s, 1); /* incremental == 1 : Changes only */
             out_uint16_be(s, 0);
             out_uint16_be(s, 0);
             out_uint16_be(s, v->mod_width);
@@ -1188,8 +1582,14 @@ lib_mod_connect(struct vnc *v)
 
     if (error == 0)
     {
-        in_uint16_be(s, v->mod_width);
-        in_uint16_be(s, v->mod_height);
+        /* In resizeable mode, we're not interested at this stage how
+         * big the X server is, as we're going to go for the size set
+         * by the "client_info" param */
+        if (!v->resizeable_mode)
+        {
+            in_uint16_be(s, v->mod_width);
+            in_uint16_be(s, v->mod_height);
+        }
         init_stream(pixel_format, 8192);
         v->server_msg(v, "VNC receiving pixel format", 0);
         error = trans_force_read_s(v->trans, pixel_format, 16);
@@ -1329,11 +1729,20 @@ lib_mod_connect(struct vnc *v)
         init_stream(s, 8192);
         out_uint8(s, 2);
         out_uint8(s, 0);
-        out_uint16_be(s, 4);
-        out_uint32_be(s, 0); /* raw */
-        out_uint32_be(s, 1); /* copy rect */
-        out_uint32_be(s, 0xffffff11); /* cursor */
-        out_uint32_be(s, 0xffffff21); /* desktop size */
+        out_uint16_be(s, 4); /* Number of encodings following */
+        out_uint32_be(s, ENC_RAW);
+        out_uint32_be(s, ENC_COPY_RECT);
+        out_uint32_be(s, ENC_CURSOR);
+        if (v->resizeable_mode)
+        {
+            v->server_msg(v, "VNC with ExtendedDesktopSize pseudo-encoding", 0);
+            out_uint32_be(s, ENC_EXTENDED_DESKTOP_SIZE);
+        }
+        else
+        {
+            v->server_msg(v, "VNC with DesktopSize pseudo-encoding", 0);
+            out_uint32_be(s, ENC_DESKTOP_SIZE);
+        }
         v->server_msg(v, "VNC sending encodings", 0);
         s_mark_end(s);
         error = trans_force_write_s(v->trans, s);
@@ -1344,6 +1753,7 @@ lib_mod_connect(struct vnc *v)
         error = v->server_reset(v, v->mod_width, v->mod_height, v->mod_bpp);
     }
 
+    v->first_framebuffer_update = 1;
     if (error == 0)
     {
         if (v->suppress_output == 0)
@@ -1351,7 +1761,7 @@ lib_mod_connect(struct vnc *v)
             /* FramebufferUpdateRequest */
             init_stream(s, 8192);
             out_uint8(s, 3);
-            out_uint8(s, 0);
+            out_uint8(s, 0); /* incremental == 0 : Full contents */
             out_uint16_be(s, 0);
             out_uint16_be(s, 0);
             out_uint16_be(s, v->mod_width);
@@ -1430,6 +1840,8 @@ lib_mod_end(struct vnc *v)
 int
 lib_mod_set_param(struct vnc *v, const char *name, const char *value)
 {
+    unsigned int i;
+
     if (g_strcasecmp(name, "username") == 0)
     {
         g_strncpy(v->username, value, 255);
@@ -1459,6 +1871,56 @@ lib_mod_set_param(struct vnc *v, const char *name, const char *value)
         v->got_guid = 1;
         g_memcpy(v->guid, value, 16);
     }
+    else if (g_strcasecmp(name, "code") == 0)
+    {
+        v->resizeable_mode = (g_atoi(value) == 1);
+    }
+    else if (g_strcasecmp(name, "client_info") == 0)
+    {
+        const struct xrdp_client_info *client_info =
+            (const struct xrdp_client_info *) value;
+
+        g_free(v->screen_layout.s);
+
+        /* The RDP client (width,height) is requested for the X server
+         * later on if we're in resizeable mode. If we're not, these
+         * settings will be overwritten later by the ServerInit
+         * message from the X server */
+        v->mod_width = client_info->width;
+        v->mod_height = client_info->height;
+
+        /* Save info needed for resizeable support */
+        if (!client_info->multimon || client_info->monitorCount < 1)
+        {
+            v->screen_layout.count = 1;
+            v->screen_layout.s = g_new(struct vnc_screen, 1);
+            v->screen_layout.s[0].id = 0;
+            v->screen_layout.s[0].x = 0;
+            v->screen_layout.s[0].y = 0;
+            v->screen_layout.s[0].width = client_info->width;
+            v->screen_layout.s[0].height = client_info->height;
+            v->screen_layout.s[0].flags = 0;
+        }
+        else
+        {
+            v->screen_layout.count = client_info->monitorCount;
+            v->screen_layout.s = g_new(struct vnc_screen,
+                                       v->screen_layout.count);
+            for (i = 0 ; i < client_info->monitorCount ; ++i)
+            {
+                v->screen_layout.s[i].id = i;
+                v->screen_layout.s[i].x = client_info->minfo[i].left;
+                v->screen_layout.s[i].y = client_info->minfo[i].top;
+                v->screen_layout.s[i].width =  client_info->minfo[i].right -
+                                               client_info->minfo[i].left + 1;
+                v->screen_layout.s[i].height = client_info->minfo[i].bottom -
+                                               client_info->minfo[i].top + 1;
+                v->screen_layout.s[i].flags = 0;
+            }
+        }
+        log_debug_screen_layout("client_info", &v->screen_layout);
+    }
+
 
     return 0;
 }
@@ -1526,7 +1988,7 @@ lib_mod_suppress_output(struct vnc *v, int suppress,
         make_stream(s);
         init_stream(s, 8192);
         out_uint8(s, 3);
-        out_uint8(s, 0);
+        out_uint8(s, 0); /* incremental == 0 : Full contents */
         out_uint16_be(s, 0);
         out_uint16_be(s, 0);
         out_uint16_be(s, v->mod_width);
@@ -1575,5 +2037,6 @@ mod_exit(tintptr handle)
     }
     trans_delete(v->trans);
     g_free(v);
+    g_free(v->screen_layout.s);
     return 0;
 }

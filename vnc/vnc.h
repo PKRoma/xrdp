@@ -26,6 +26,24 @@
 
 #define CURRENT_MOD_VER 4
 
+/* Screen used for ExtendedDesktopSize / Set DesktopSize */
+struct vnc_screen
+{
+    int id;
+    int x;
+    int y;
+    int width;
+    int height;
+    int flags;
+};
+
+struct vnc_screen_layout
+{
+    unsigned int count;
+    /* For comparison, screens are sorted in increasing order of ID */
+    struct vnc_screen *s;
+};
+
 struct vnc
 {
     int size; /* size of this struct */
@@ -120,4 +138,9 @@ struct vnc
     int got_guid;
     tui8 guid[16];
     int suppress_output;
+    /* Resizeable support */
+    int resizeable_mode;  /* true for resizeable mode, false for traditional */
+    struct vnc_screen_layout screen_layout;
+    int first_framebuffer_update; /* Identifies the first framebuffer_update */
+    int set_desktop_size_in_progress; /* Waiting for SetDesktopSize response */
 };
