@@ -290,7 +290,7 @@ struct xrdp_mm
   int (*mod_exit)(struct xrdp_mod*);
   struct xrdp_mod* mod; /* module interface */
   int display; /* 10 for :10.0, 11 for :11.0, etc */
-  int code; /* 0=Xvnc session, 10=X11rdp session, 20=xorg driver mode */
+  int code; /* 0/1=Xvnc session, 10=X11rdp session, 20=xorg driver mode */
   int sesman_controlled; /* true if this is a sesman session */
   struct trans* chan_trans; /* connection to chansrv */
   int chan_trans_up; /* true once connected to chansrv */

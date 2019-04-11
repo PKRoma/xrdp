@@ -56,6 +56,10 @@ scp_v0c_connect(struct SCP_CONNECTION *c, struct SCP_SESSION *s)
     {
         out_uint16_be(c->out_s, 0);
     }
+    else if (s->type == SCP_SESSION_TYPE_RESIZABLE_XVNC)
+    {
+        out_uint16_be(c->out_s, 1);
+    }
     else if (s->type == SCP_SESSION_TYPE_XRDP)
     {
         out_uint16_be(c->out_s, 10);
@@ -199,7 +203,7 @@ scp_v0s_accept(struct SCP_CONNECTION *c, struct SCP_SESSION **s, int skipVchk)
 
     in_uint16_be(c->in_s, code);
 
-    if (code == 0 || code == 10 || code == 20)
+    if (code == 0 || code == 1 || code == 10 || code == 20)
     {
         session = scp_session_create();
 
@@ -214,6 +218,10 @@ scp_v0s_accept(struct SCP_CONNECTION *c, struct SCP_SESSION **s, int skipVchk)
         if (code == 0)
         {
             scp_session_set_type(session, SCP_SESSION_TYPE_XVNC);
+        }
+        else if (code == 1)
+        {
+            scp_session_set_type(session, SCP_SESSION_TYPE_RESIZABLE_XVNC);
         }
         else if (code == 10)
         {

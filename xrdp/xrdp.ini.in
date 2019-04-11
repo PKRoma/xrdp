@@ -171,6 +171,12 @@ ip=127.0.0.1
 port=-1
 #xserverbpp=24
 #delay_ms=2000
+; If your Xvnc server supports the ExtendedDesktopSize encoding, you can
+; uncomment the following line for resizeable session support. This includes
+; support for multiple monitors.
+; Unlike traditional VNC sessions, you can connect to (and resize) active
+; VNC sessions on the same machine which have different sizes.
+#code=1
 
 [vnc-any]
 name=vnc-any

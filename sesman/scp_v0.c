@@ -120,7 +120,8 @@ scp_v0_process(struct SCP_CONNECTION *c, struct SCP_SESSION *s)
                                 "username %s", s->username);
                 }
 
-                if (SCP_SESSION_TYPE_XVNC == s->type)
+                if (SCP_SESSION_TYPE_XVNC == s->type ||
+                    SCP_SESSION_TYPE_RESIZABLE_XVNC == s->type)
                 {
                     log_message( LOG_LEVEL_INFO, "starting Xvnc session...");
                     display = session_start(data, SESMAN_SESSION_TYPE_XVNC, c, s);
