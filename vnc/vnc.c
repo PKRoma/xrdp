@@ -29,15 +29,15 @@
 
 #define LLOG_LEVEL 1
 #define LLOGLN(_level, _args) \
-  do \
-  { \
-    if (_level < LLOG_LEVEL) \
+    do \
     { \
-        g_write("xrdp:vnc [%10.10u]: ", g_time3()); \
-        g_writeln _args ; \
+        if (_level < LLOG_LEVEL) \
+        { \
+            g_write("xrdp:vnc [%10.10u]: ", g_time3()); \
+            g_writeln _args ; \
+        } \
     } \
-  } \
-  while (0)
+    while (0)
 
 #define AS_LOG_MESSAGE log_message
 
@@ -1026,7 +1026,7 @@ lib_mod_connect(struct vnc *v)
         default:
             v->server_msg(v, "VNC error - only supporting 8, 15, 16, 24 and 32 "
                           "bpp rdp connections", 0);
-        return 1;
+            return 1;
     }
 
     if (g_strcmp(v->ip, "") == 0)
@@ -1055,7 +1055,7 @@ lib_mod_connect(struct vnc *v)
         v->server_msg(v, text, 0);
         g_sleep(v->delay_ms);
     }
-    
+
     g_sprintf(text, "VNC connecting to %s %s", v->ip, con_port);
     v->server_msg(v, text, 0);
 
@@ -1504,7 +1504,7 @@ lib_mod_check_wait_objs(struct vnc *v)
 /******************************************************************************/
 /* return error */
 int
-lib_mod_frame_ack(struct vnc* v, int flags, int frame_id)
+lib_mod_frame_ack(struct vnc *v, int flags, int frame_id)
 {
     return 0;
 }
@@ -1512,7 +1512,7 @@ lib_mod_frame_ack(struct vnc* v, int flags, int frame_id)
 /******************************************************************************/
 /* return error */
 int
-lib_mod_suppress_output(struct vnc* v, int suppress,
+lib_mod_suppress_output(struct vnc *v, int suppress,
                         int left, int top, int right, int bottom)
 {
     int error;
