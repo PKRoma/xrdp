@@ -287,7 +287,7 @@ log_debug_screen_layout(const char *source,
                      source, layout->count);
 
     i = 0;
-    while (res > 0 && res < sizeof(text) - pos && i < layout->count)
+    while (res > 0 && (size_t)res < sizeof(text) - pos && i < layout->count)
     {
         pos += res;
         res = g_snprintf(&text[pos], sizeof(text) - pos,
@@ -297,7 +297,7 @@ log_debug_screen_layout(const char *source,
                          layout->s[i].x, layout->s[i].y);
         ++i;
     }
-    log_message(LOG_LEVEL_DEBUG, text);
+    log_message(LOG_LEVEL_DEBUG, "%s", text);
 }
 
 /*****************************************************************************
@@ -1840,8 +1840,6 @@ lib_mod_end(struct vnc *v)
 int
 lib_mod_set_param(struct vnc *v, const char *name, const char *value)
 {
-    unsigned int i;
-
     if (g_strcasecmp(name, "username") == 0)
     {
         g_strncpy(v->username, value, 255);
@@ -1903,6 +1901,7 @@ lib_mod_set_param(struct vnc *v, const char *name, const char *value)
         }
         else
         {
+            int i;
             v->screen_layout.count = client_info->monitorCount;
             v->screen_layout.s = g_new(struct vnc_screen,
                                        v->screen_layout.count);
