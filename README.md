@@ -33,7 +33,7 @@ RDP transport is encrypted using TLS by default.
  * drive redirection (mount local client drives on remote machine)
 
 ## Quick Start
-
+ 
 Most Linux distributions should distribute the latest release of xrdp in their
 repository. You would need xrdp and xorgxrdp packages for the best
 experience. It is recommended that xrdp depends on xorgxrdp, so it should
