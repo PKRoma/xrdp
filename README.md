@@ -50,7 +50,7 @@ for x86 using SIMD instructions. So running xrdp on x86 processors will get
 fully accelerated experience.
 
 ## Quick Start
-
+ 
 Most Linux distributions should distribute the latest release of xrdp in their
 repository. You would need xrdp and xorgxrdp packages for the best
 experience. It is recommended that xrdp depends on xorgxrdp, so it should
