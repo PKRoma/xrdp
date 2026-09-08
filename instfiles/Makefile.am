@@ -46,6 +46,7 @@ dist_startscript_DATA = \
   km-00000416.toml \
   km-00000419.toml \
   km-0000041d.toml \
+  km-0000041f.toml \
   km-00000424.toml \
   km-00000426.toml \
   km-00010426.toml \
