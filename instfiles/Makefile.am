@@ -104,6 +104,7 @@ endif
 if FREEBSD
 	sed -e 's|%%PREFIX%%|$(prefix)|g' \
 	    -e 's|%%LOCALSTATEDIR%%|$(localstatedir)|g' \
+	    -e 's|%%SYSCONFSUBDIR%%|$(sysconfsubdir)|g' \
 		-i '' \
 		$(DESTDIR)$(sysconfdir)/rc.d/xrdp \
 		$(DESTDIR)$(sysconfdir)/rc.d/xrdp-sesman

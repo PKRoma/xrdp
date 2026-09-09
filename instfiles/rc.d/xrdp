@@ -42,13 +42,15 @@ rcvar="xrdp_enable"
 load_rc_config "$name"
 : ${xrdp_enable="NO"}
 
-extra_commands="status allstart allstop allrestart"
+extra_commands="status allstart allstop allrestart keygen"
 command="%%PREFIX%%/sbin/xrdp"
 
 allstart_cmd="xrdp_allstart"
 allstop_cmd="xrdp_allstop"
 allrestart_cmd="xrdp_allrestart"
+start_precmd="xrdp_precmd"
 stop_postcmd="xrdp_poststop"
+keygen_cmd="xrdp_generate_default_keys"
 
 xrdp_allstart()
 {
@@ -86,4 +88,43 @@ xrdp_poststop()
     # PID file
     rm -f %%LOCALSTATEDIR%%/run/xrdp.pid
 }
+
+xrdp_precmd()
+{
+    run_rc_command "keygen"
+}
+
+xrdp_generate_default_keys()
+{
+    local rsakeys=rsakeys.ini
+    local privatekey=key.pem
+    local certificate=cert.pem
+    local xrdp_user=_xrdp  # def. /usr/ports/UIDs
+    local xrdp_group=_xrdp # def. /usr/ports/GIDs
+    (
+        cd %%PREFIX%%/etc/%%SYSCONFSUBDIR%% || exit 1
+
+        umask 027
+
+        [ -e "$rsakeys" ] || %%PREFIX%%/bin/xrdp-keygen xrdp "$rsakeys"
+        [ -e "$privatekey" -a -e "$certificate" ] || \
+            openssl req \
+                -x509 \
+                -newkey ed25519 \
+                -noenc \
+                -keyout "$privatekey" \
+                -out "$certificate" \
+                -days 1825 \
+                -subj "/CN=$(hostname)" || exit 1
+
+        # set group permission for the keys
+        pw groupshow "$xrdp_group" >/dev/null 2>&1 && \
+            for f in "$rsakeys" "$privatekey" "$certificate"
+            do
+                chown :"$xrdp_group" "$f"
+                chmod g+r "$f"
+            done
+    )
+}
+
 run_rc_command "$1"
