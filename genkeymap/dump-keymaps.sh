@@ -56,6 +56,10 @@ setxkbmap -model pc104 -layout ru
 setxkbmap -model pc104 -layout se
 ./xrdp-genkeymap ../instfiles/km-0000041d.ini
 
+# Turkish Q 'tr' 0x0000041f
+setxkbmap -model pc105 -layout tr
+./xrdp-genkeymap ../instfiles/km-0000041f.ini
+
 # Slovenian 'si' 0x00000424
 setxkbmap -model pc104 -layout si
 ./xrdp-genkeymap ../instfiles/km-00000424.ini
